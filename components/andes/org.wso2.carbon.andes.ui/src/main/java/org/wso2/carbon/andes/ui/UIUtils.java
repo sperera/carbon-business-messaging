@@ -25,6 +25,7 @@ import org.apache.axis2.context.ConfigurationContext;
 import org.wso2.carbon.CarbonConstants;
 import org.wso2.carbon.andes.stub.AndesAdminServiceStub;
 import org.wso2.carbon.andes.stub.admin.types.Queue;
+import org.wso2.carbon.andes.stub.admin.types.QueueRolePermission;
 import org.wso2.carbon.andes.stub.admin.types.Subscription;
 import org.wso2.carbon.andes.ui.client.QueueReceiverClient;
 import org.wso2.carbon.base.ServerConfiguration;
@@ -359,5 +360,28 @@ public class UIUtils {
                 new QName(QPID_CONF_SSL_ONLY_NODE));
 
         return Boolean.parseBoolean(sslOnlyNode.getText());
+    }
+
+    /**
+     * Filter the full user-roles list to suit the range
+     * @param fullList full list of roles
+     * @param startingIndex starting index to filter
+     * @param maxRolesCount maximum number of roles that the filtered list can contain
+     * @return  ArrayList<QueueRolePermission>
+     */
+    public static ArrayList<QueueRolePermission> getFilteredRoleList
+    (ArrayList<QueueRolePermission> fullList, int startingIndex, int maxRolesCount) {
+        int resultSetSize = maxRolesCount;
+
+        if ((fullList.size() - startingIndex) < maxRolesCount) {
+            resultSetSize = (fullList.size() - startingIndex);
+        }
+
+        ArrayList<QueueRolePermission> resultList = new ArrayList<QueueRolePermission>();
+        for(int i = startingIndex; i < startingIndex + resultSetSize ; i++){
+            resultList.add(fullList.get(i));
+        }
+
+        return resultList;
     }
 }

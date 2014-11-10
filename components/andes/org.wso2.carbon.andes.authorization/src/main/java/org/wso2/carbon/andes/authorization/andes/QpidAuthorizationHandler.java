@@ -30,6 +30,8 @@ import org.wso2.carbon.user.api.UserRealm;
 import org.wso2.carbon.user.api.UserStoreException;
 import org.wso2.carbon.user.api.UserStoreManager;
 import org.wso2.carbon.user.core.authorization.TreeNode;
+import org.wso2.carbon.user.core.util.UserCoreUtil;
+import org.wso2.carbon.utils.multitenancy.MultitenantUtils;
 
 /**
  * This class includes the actual access control logic
@@ -55,6 +57,8 @@ public class QpidAuthorizationHandler {
     private static final String PERMISSION_ADMIN_MANAGE_TOPIC_DELETE_TOPIC =
             "/permission/admin/manage/topic/deleteTopic";
     private static final String PERMISSION_ADMIN_MANAGE_DLC_BROWSE_DLC = "/permission/admin/manage/dlc/browseDlc";
+    private static final String QUEUE_ROLE_PREFIX = "Q_";
+    private static final String TOPIC_ROLE_PREFIX = "T_";
 
     /**
      * Handle creating queue
@@ -78,25 +82,17 @@ public class QpidAuthorizationHandler {
                             getRawQueueName(properties.get(ObjectProperties.Property.NAME));
 
                     //For registry we use a modified queue name
-                    String newQname = queueName.replace("@", AT_REPLACE_CHAR);
+                    String newQueueName = queueName.replace("@", AT_REPLACE_CHAR);
                     // Store queue details
-                    RegistryClient.createQueue(newQname, username);
+                    RegistryClient.createQueue(newQueueName, username);
 
                     String queueID = CommonsUtil.getQueueID(queueName);
 
-                    if (isOwnDomain(tenantDomain, queueName) || isTopicSubscriberQueue(queueName)) {
-                        UserStoreManager userStoreManager = userRealm.getUserStoreManager();
-                        String[] roleNames = userStoreManager.getRoleListOfUser(username);
-                        for (String role : roleNames) {
-                            if (!role.equalsIgnoreCase(ROLE_EVERY_ONE) && userStoreManager.isExistingRole(role)) {
-                                userRealm.getAuthorizationManager().authorizeRole(
-                                        role, queueID, TreeNode.Permission.CONSUME.toString().toLowerCase());
-                                userRealm.getAuthorizationManager().authorizeRole(
-                                        role, queueID, TreeNode.Permission.PUBLISH.toString().toLowerCase());
-                                userRealm.getAuthorizationManager().authorizeRole(
-                                        role, queueID, PERMISSION_CHANGE_PERMISSION);
-                            }
-                        }
+                    if (isTopicSubscriberQueue(queueName)) {
+                        return Result.ALLOWED;
+                    } else if (isOwnDomain(tenantDomain, queueName)) {
+                        authorizeQueuePermissionsToLoggedInUser(username, newQueueName, queueID,
+                                userRealm);
                         return Result.ALLOWED;
                     }
                 }
@@ -178,12 +174,16 @@ public class QpidAuthorizationHandler {
                     String queueID = CommonsUtil.getQueueID(queueName);
 
                     // Authorize
-                    if (isAdminUser(username, userRealm) && isOwnDomain(tenantDomain, queueName)) {
+                    if (isTopicSubscriberQueue(queueName)) {
                         return Result.ALLOWED;
-                    } else if (userRealm.getAuthorizationManager().isUserAuthorized(
-                            username, queueID,
-                            TreeNode.Permission.CONSUME.toString().toLowerCase())) {
-                        return Result.ALLOWED;
+                    } else {
+                        if (isAdminUser(username, userRealm) && isOwnDomain(tenantDomain, queueName)) {
+                            return Result.ALLOWED;
+                        } else if (userRealm.getAuthorizationManager().isUserAuthorized(
+                                username, queueID,
+                                TreeNode.Permission.CONSUME.toString().toLowerCase())) {
+                            return Result.ALLOWED;
+                        }
                     }
                 } else if (DIRECT_EXCHANGE.equals(exchangeName)) {
                     String queueID = CommonsUtil.getQueueID(queueName);
@@ -207,25 +207,41 @@ public class QpidAuthorizationHandler {
                         String tenantDomain = CarbonContext.getThreadLocalCarbonContext().getTenantDomain();
                         routingKey = routingKey.substring(tenantDomain.length() + 1);
                     }*/
-                    String topicID = CommonsUtil.getTopicID(routingKey);
+
+                    String newRoutingKey = routingKey.replace("@", AT_REPLACE_CHAR);
+                    String roleName = UserCoreUtil.addInternalDomainName(TOPIC_ROLE_PREFIX +
+                            newRoutingKey.replace("/", "-"));
+                    UserStoreManager userStoreManager = userRealm.getUserStoreManager();
+                    String topicId = CommonsUtil.getTopicID(routingKey);
+                    String newQName = queueName.replace("@", AT_REPLACE_CHAR);
+                    String tempQueueId = CommonsUtil.getQueueID(queueName);
 
                     // Authorize
-                    String newRoutingKey = routingKey.replace("@", AT_REPLACE_CHAR);
-                    String newQName = queueName.replace("@", AT_REPLACE_CHAR);
-                    if (isAdminUser(username, userRealm) && (isOwnDomain(tenantDomain,
-                            queueName) || isTopicSubscriberQueue(queueName))) {
+                    if (!userStoreManager.isExistingRole(roleName) && userRealm
+                            .getAuthorizationManager().isUserAuthorized(username, PERMISSION_ADMIN_MANAGE_TOPIC_ADD_TOPIC, UI_EXECUTE)) {
 
-                        // Store subscription
+                        //This is triggered when a topic is created.So the user who creates the
+                        // topic will get publish/subscribe permissions
                         RegistryClient.createSubscription(newRoutingKey, newQName, username);
-
+                        authorizeTopicPermissionsToLoggedInUser(username, newRoutingKey, topicId,
+                                tempQueueId, userRealm);
                         return Result.ALLOWED;
-                    } else if (userRealm.getAuthorizationManager().isUserAuthorized(
-                            username, topicID,
-                            TreeNode.Permission.SUBSCRIBE.toString().toLowerCase())) {
+                    } else if (isAdminUser(username, userRealm) && isOwnDomain(tenantDomain,
+                            queueName)) {
+                        // admin user who is in the same tenant domain get permission
+
                         // Store subscription
-
                         RegistryClient.createSubscription(newRoutingKey, newQName, username);
+                        return Result.ALLOWED;
+                    } else if (userRealm.getAuthorizationManager().isUserAuthorized(username,
+                            topicId, TreeNode.Permission.SUBSCRIBE.toString().toLowerCase())) {
+                        //This is triggered when a new subscriber is arrived when the topic
+                        // has already been created
 
+                        // Store subscription
+                        RegistryClient.createSubscription(newRoutingKey, newQName, username);
+                        authorizeTopicPermissionsToLoggedInUser(username, newRoutingKey, topicId,
+                                tempQueueId, userRealm);
                         return Result.ALLOWED;
                     }
                 }
@@ -360,6 +376,12 @@ public class QpidAuthorizationHandler {
                 String newQName = queueName.replace("@", AT_REPLACE_CHAR);
                 RegistryClient.deleteQueue(newQName);
 
+                // Do not remove the role for topics
+                if (isTopicSubscriberQueue(queueName)) {
+                    return Result.ALLOWED;
+                }
+
+                removeQueueRoleCreateForLoggedInUser(newQName);
                 return Result.ALLOWED;
             }
         } catch (RegistryClientException e) {
@@ -462,6 +484,120 @@ public class QpidAuthorizationHandler {
     private static boolean isTopicSubscriberQueue(String queueName) {
         return queueName.startsWith("tmp_");
 
+    }
+
+    /**
+     * Create a new role which has the same name as the queueName and assign the logged in
+     * user to the newly created role. Then, authorize the newly created role to subscribe and
+     * publish to the queue.
+     *
+     * @param username  name of the logged in user
+     * @param queueName queue name
+     * @param queueId   ID given to the queue
+     * @param userRealm User's Realm
+     * @throws UserStoreException
+     */
+    private static void authorizeQueuePermissionsToLoggedInUser(String username, String queueName,
+                                                                String queueId,
+                                                                UserRealm userRealm) throws
+            UserStoreException {
+        //if the queue name has the tenant domain prefix we need to remove it
+        if (CarbonContext.getThreadLocalCarbonContext().getTenantId() > 0) {
+            String tenantDomain = CarbonContext.getThreadLocalCarbonContext().getTenantDomain();
+            if (queueName.startsWith(tenantDomain)) {
+                queueName = queueName.substring(tenantDomain.length() + 1);
+            }
+        }
+        String roleName = UserCoreUtil.addInternalDomainName(QUEUE_ROLE_PREFIX +
+                queueName.replace("/", "-"));
+        UserStoreManager userStoreManager = userRealm.getUserStoreManager();
+        if (!userStoreManager.isExistingRole(roleName)) {
+            String[] user = {MultitenantUtils.getTenantAwareUsername(username)};
+            userStoreManager.addRole(roleName, user, null);
+            userRealm.getAuthorizationManager().authorizeRole(roleName, queueId,
+                    PERMISSION_CHANGE_PERMISSION);
+            userRealm.getAuthorizationManager().authorizeRole(roleName, queueId,
+                    TreeNode.Permission.CONSUME.toString().toLowerCase());
+            userRealm.getAuthorizationManager().authorizeRole(roleName, queueId,
+                    TreeNode.Permission.PUBLISH.toString().toLowerCase());
+        } else {
+            log.warn("Unable to provide permissions to the user, " + username + ", " +
+                    "to subscribe and publish to " + queueName);
+        }
+    }
+
+    /**
+     * Create a new role which has the same name as the topicName and assign the logged in
+     * user to the newly created role. Then, authorize the newly created role to subscribe and
+     * publish to the topic.
+     *
+     * @param username    name of the logged in user
+     * @param topicName   destination name. Either topic or queue name
+     * @param topicId     Id given to the destination
+     * @param tempQueueID Id given to the binding temp queue
+     * @param userRealm   User's Realm
+     * @throws UserStoreException
+     */
+    private static void authorizeTopicPermissionsToLoggedInUser(String username,
+                                                                String topicName, String topicId,
+                                                                String tempQueueID,
+                                                                UserRealm userRealm) throws
+            UserStoreException {
+        String roleName = UserCoreUtil.addInternalDomainName(TOPIC_ROLE_PREFIX + topicName
+                .replace("/", "-"));
+        UserStoreManager userStoreManager = userRealm.getUserStoreManager();
+        String[] user = {MultitenantUtils.getTenantAwareUsername(username)};
+        if (!userStoreManager.isExistingRole(roleName)) {
+            userStoreManager.addRole(roleName, user, null);
+        }
+
+        boolean userShouldBeAdded = true;
+        for (String foundUser : userStoreManager.getUserListOfRole(roleName)) {
+            if (username.equals(foundUser)) {
+                userShouldBeAdded = false;
+                break;
+            }
+        }
+        if (userShouldBeAdded) {
+            userStoreManager.updateUserListOfRole(roleName, new String[0], user);
+        }
+
+        //Giving permissions to the topic
+        userRealm.getAuthorizationManager().authorizeRole(roleName, topicId,
+                TreeNode.Permission.SUBSCRIBE.toString().toLowerCase());
+        userRealm.getAuthorizationManager().authorizeRole(roleName, topicId,
+                TreeNode.Permission.PUBLISH.toString().toLowerCase());
+        userRealm.getAuthorizationManager().authorizeRole(roleName, topicId,
+                PERMISSION_CHANGE_PERMISSION);
+
+        //Giving permissions for the temporary queue
+        userRealm.getAuthorizationManager().authorizeRole(roleName, tempQueueID,
+                TreeNode.Permission.CONSUME.toString().toLowerCase());
+        userRealm.getAuthorizationManager().authorizeRole(roleName, tempQueueID,
+                TreeNode.Permission.PUBLISH.toString().toLowerCase());
+        userRealm.getAuthorizationManager().authorizeRole(roleName, tempQueueID,
+                PERMISSION_CHANGE_PERMISSION);
+    }
+
+    /**
+     * Every queue has a role with the name QUEUE_ROLE_PREFIX+queueName. This role is used
+     * to store the permissions for the user who created the queue.This role should be
+     * deleted when the queue/topic is deleted.
+     *
+     * @param queueName name of the queue or topic
+     * @throws UserStoreException
+     */
+    private static void removeQueueRoleCreateForLoggedInUser(String queueName) throws
+            UserStoreException {
+        String roleName = UserCoreUtil.addInternalDomainName(QUEUE_ROLE_PREFIX +
+                queueName.replace("/", "-"));
+
+        UserStoreManager userStoreManager = CarbonContext.getThreadLocalCarbonContext()
+                .getUserRealm().getUserStoreManager();
+
+        if (userStoreManager.isExistingRole(roleName)) {
+            userStoreManager.deleteRole(roleName);
+        }
     }
 }
 

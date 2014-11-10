@@ -44,21 +44,6 @@ function addQueueToBackEnd(queue, createdFrom) {
 }
 
 function addPermissions() {
-    var permissionTable = document.getElementById("permissionsTable");
-    var rowCount = permissionTable.rows.length;
-    var parameters = "";
-    for (var i = 1; i < rowCount; i++) {
-        /* since there can be special characters in roleNames we need to encode them before send the parameters to backend*/
-        var roleName = encodeURIComponent(permissionTable.rows[i].cells[0].innerHTML.replace(/^\s+|\s+$/g, ""));
-        var consumeAllowed = permissionTable.rows[i].cells[1].getElementsByTagName("input")[0].checked;
-        var publishAllowed = permissionTable.rows[i].cells[2].getElementsByTagName("input")[0].checked;
-        if (i == 1) {
-            parameters = roleName + "," + consumeAllowed + "," + publishAllowed + ",";
-        } else {
-            parameters = parameters + roleName + "," + consumeAllowed + "," + publishAllowed + ",";
-        }
-    }
-
     var callback =
     {
         success:function(o) {
@@ -81,7 +66,7 @@ function addPermissions() {
             }
         }
     };
-    var request = YAHOO.util.Connect.asyncRequest('POST', "update_queue_role_permissions_ajaxprocessor.jsp", callback, "permissions=" + parameters + "&type=input");
+    var request = YAHOO.util.Connect.asyncRequest('POST', "update_queue_role_permissions_from_session_ajaxprocessor.jsp", callback, "type=input");
 }
 
 function updatePermissions() {

@@ -17,7 +17,6 @@
  */
 package org.wso2.carbon.andes.core;
 
-
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.wso2.andes.server.ClusterResourceHolder;
@@ -29,7 +28,7 @@ import org.wso2.carbon.andes.core.internal.ds.QueueManagerServiceValueHolder;
 import org.wso2.carbon.andes.core.internal.registry.QueueManagementBeans;
 import org.wso2.carbon.andes.core.internal.util.QueueManagementConstants;
 import org.wso2.carbon.andes.core.internal.util.Utils;
-import org.wso2.carbon.andes.core.types.*;
+import org.wso2.carbon.andes.core.types.QueueRolePermission;
 import org.wso2.carbon.base.ServerConfiguration;
 import org.wso2.carbon.context.CarbonContext;
 import org.wso2.carbon.registry.core.exceptions.RegistryException;
@@ -38,10 +37,11 @@ import org.wso2.carbon.user.api.UserRealm;
 import org.wso2.carbon.user.api.UserStoreException;
 import org.wso2.carbon.user.api.UserStoreManager;
 import org.wso2.carbon.user.core.authorization.TreeNode;
+import org.wso2.carbon.user.core.util.UserCoreUtil;
 import org.wso2.carbon.utils.multitenancy.MultitenantConstants;
+import org.wso2.carbon.utils.multitenancy.MultitenantUtils;
 
 import javax.jms.*;
-import javax.jms.Message;
 import javax.jms.Queue;
 import javax.naming.Context;
 import javax.naming.InitialContext;
@@ -51,7 +51,6 @@ import java.io.FileNotFoundException;
 import java.io.UnsupportedEncodingException;
 import java.net.URLEncoder;
 import java.util.*;
-
 
 public class QueueManagerServiceImpl implements QueueManagerService {
 
@@ -67,6 +66,8 @@ public class QueueManagerServiceImpl implements QueueManagerService {
     private static final String CF_NAME = "qpidConnectionfactory";
     public static final String UI_EXECUTE = "ui.execute";
     public static final String PERMISSION_ADMIN_MANAGE_DLC_BROWSE_DLC = "/permission/admin/manage/dlc/browseDlc";
+    private static final String AT_REPLACE_CHAR = "_";
+    private static final String QUEUE_ROLE_PREFIX = "Q_";
     private Properties properties;
     private QueueConnection queueConnection;
     private QueueSession queueSession;
@@ -88,18 +89,8 @@ public class QueueManagerServiceImpl implements QueueManagerService {
                                         MultitenantConstants.SUPER_TENANT_ID : CarbonContext
                                         .getThreadLocalCarbonContext()
                                         .getTenantId());
-
                 String queueID = CommonsUtil.getQueueID(queueName);
-                UserStoreManager userStoreManager = userRealm.getUserStoreManager();
-                //Get all the roles of the logged in user and check whether the role is existing
-                String[] roleNames = userStoreManager.getRoleListOfUser(CarbonContext.getThreadLocalCarbonContext()
-                        .getUsername());
-                for (String role : roleNames) {
-                    if (!role.equalsIgnoreCase(ROLE_EVERY_ONE) && userStoreManager.isExistingRole(role)) {
-                        userRealm.getAuthorizationManager().authorizeRole(
-                                role, queueID, PERMISSION_CHANGE_PERMISSION);
-                    }
-                }
+                authorizePermissionsToLoggedInUser(queueName, queueID, userRealm);
             } else {
                 // TODO : Can we use error code for cleaner error handling ? this will hard bind to
                 //
@@ -159,6 +150,12 @@ public class QueueManagerServiceImpl implements QueueManagerService {
         return filteredQueueByUser;
     }
 
+    /**
+     * This method is triggered when deleting a queue through management console.
+     *
+     * @param queueName  name of the queue
+     * @throws QueueManagerException
+     */
     public void deleteQueue(String queueName) throws QueueManagerException {
         try {
             UserRegistry userRegistry = Utils.getUserRegistry();
@@ -167,6 +164,8 @@ public class QueueManagerServiceImpl implements QueueManagerService {
                 QueueManagementBeans.getInstance().deleteQueue(queueName);
                 userRegistry.delete(resourcePath);
             }
+
+            removeRoleCreateForLoggedInUser(queueName);
         } catch (RegistryException e) {
             throw new QueueManagerException("Failed to delete queue : " + queueName, e);
         }
@@ -544,5 +543,68 @@ public class QueueManagerServiceImpl implements QueueManagerService {
         return userName.trim();
     }
 
+    /**
+     * Create a new role which has the same name as the queueName and assign the logged in
+     * user to the newly created role. Then, authorize the newly created role to subscribe and
+     * publish to the queue.
+     *
+     * @param queueName queue name
+     * @param queueId   Id given to the queue
+     * @param userRealm User's Realm
+     * @throws QueueManagerException
+     */
+    private static void authorizePermissionsToLoggedInUser(String queueName, String queueId,
+                                                           UserRealm userRealm) throws
+            QueueManagerException {
 
+        //For registry we use a modified queue name
+        String newQueueName = queueName.replace("@", AT_REPLACE_CHAR);
+        String username = CarbonContext.getThreadLocalCarbonContext().getUsername();
+        try {
+            String roleName = UserCoreUtil.addInternalDomainName(QUEUE_ROLE_PREFIX +
+                    queueName.replace("/", "-"));
+            UserStoreManager userStoreManager = CarbonContext.getThreadLocalCarbonContext()
+                    .getUserRealm().getUserStoreManager();
+
+            if (!userStoreManager.isExistingRole(roleName)) {
+                String[] user = {MultitenantUtils.getTenantAwareUsername(username)};
+                userStoreManager.addRole(roleName, user, null);
+                userRealm.getAuthorizationManager().authorizeRole(roleName, queueId,
+                        PERMISSION_CHANGE_PERMISSION);
+                userRealm.getAuthorizationManager().authorizeRole(roleName, queueId,
+                        TreeNode.Permission.CONSUME.toString().toLowerCase());
+                userRealm.getAuthorizationManager().authorizeRole(roleName, queueId,
+                        TreeNode.Permission.PUBLISH.toString().toLowerCase());
+            } else {
+                log.warn("Unable to provide permissions to the user, " +
+                        " " + username + ", to subscribe and publish to " + newQueueName);
+            }
+        } catch (UserStoreException e) {
+            throw new QueueManagerException("Error while creating " + newQueueName, e);
+        }
+    }
+
+    /**
+     * Every queue has a role with the same name as the queue name. This role is used to store
+     * the permissions for the user who created the queue.This role should be deleted when the
+     * queue is deleted.
+     *
+     * @param queueName name of the queue
+     * @throws QueueManagerException
+     */
+    private static void removeRoleCreateForLoggedInUser(String queueName) throws QueueManagerException {
+        //For registry we use a modified queue name
+        String newQueueName = queueName.replace("@", AT_REPLACE_CHAR);
+        String roleName = UserCoreUtil.addInternalDomainName(QUEUE_ROLE_PREFIX + newQueueName
+                .replace("/", "-"));
+        try {
+            UserStoreManager userStoreManager = CarbonContext.getThreadLocalCarbonContext()
+                    .getUserRealm().getUserStoreManager();
+            if (userStoreManager.isExistingRole(roleName)) {
+                userStoreManager.deleteRole(roleName);
+            }
+        } catch (UserStoreException e) {
+            throw new QueueManagerException("Error while deleting " + newQueueName, e);
+        }
+    }
 }

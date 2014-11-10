@@ -42,11 +42,9 @@ public class CommonsUtil {
      * @return Queue id
      */
     public static String getQueueID(String queueName) {
-
         //if the queue name has the tenant domain prefix we need to remove it
         if (CarbonContext.getThreadLocalCarbonContext().getTenantId() > 0) {
             String tenantDomain = CarbonContext.getThreadLocalCarbonContext().getTenantDomain();
-            tenantDomain = tenantDomain.replace(".", "-");
             if (queueName.startsWith(tenantDomain)) {
                 queueName = queueName.substring(tenantDomain.length() + 1);
             }
